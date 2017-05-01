@@ -58,6 +58,7 @@ static BOOL ParseStringSecurityDescriptorToSecurityDescriptor(
     SECURITY_DESCRIPTOR_RELATIVE* SecurityDescriptor,
     LPDWORD cBytes);
 static DWORD ParseAclStringFlags(LPCWSTR* StringAcl);
+static DWORD trustee_to_sid(DWORD nDestinationSidLength, PSID pDestinationSid, PTRUSTEEW pTrustee);
 
 typedef struct _ACEFLAG
 {
@@ -1264,16 +1265,127 @@ DWORD WINAPI BuildSecurityDescriptorW(
     IN ULONG cCountOfAccessEntries,
     IN PEXPLICIT_ACCESSW pListOfAccessEntries,
     IN ULONG cCountOfAuditEntries,
-    IN PEXPLICIT_ACCESSW pListofAuditEntries,
+    IN PEXPLICIT_ACCESSW pListOfAuditEntries,
     IN PSECURITY_DESCRIPTOR pOldSD,
     IN OUT PULONG lpdwBufferLength,
     OUT PSECURITY_DESCRIPTOR* pNewSD)
 { 
-    FIXME("(%p,%p,%d,%p,%d,%p,%p,%p,%p) stub!\n",pOwner,pGroup,
+    DWORD ret;
+    NTSTATUS status;
+    SECURITY_DESCRIPTOR desc;
+
+    TRACE("(%p,%p,%d,%p,%d,%p,%p,%p,%p) stub!\n",pOwner,pGroup,
           cCountOfAccessEntries,pListOfAccessEntries,cCountOfAuditEntries,
-          pListofAuditEntries,pOldSD,lpdwBufferLength,pNewSD);
+          pListOfAuditEntries,pOldSD,lpdwBufferLength,pNewSD);
  
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    if (pOldSD)
+    {
+        DWORD rev;
+        SECURITY_DESCRIPTOR_CONTROL control;
+
+        if ((status = RtlGetControlSecurityDescriptor( pOldSD, &control, &rev )) != STATUS_SUCCESS)
+            return set_ntstatus( status );
+        if (control & SE_SELF_RELATIVE)
+        {
+            DWORD descSize = sizeof(desc), daclSize = 0, saclSize = 0, ownerSize = 0, groupSize = 0;
+            PACL pDacl = NULL, pSacl = NULL;
+            PSID pOwner = NULL, pGroup = NULL;
+
+            status = RtlSelfRelativeToAbsoluteSD( pOldSD, &desc, &descSize, pDacl, &daclSize, pSacl, &saclSize,
+                                                  pOwner, &ownerSize, pGroup, &groupSize );
+            if (status == STATUS_BUFFER_TOO_SMALL)
+            {
+                descSize = sizeof(desc);
+                if (daclSize)
+                    pDacl = LocalAlloc( LMEM_FIXED, daclSize );
+                if (saclSize)
+                    pSacl = LocalAlloc( LMEM_FIXED, saclSize );
+                if (ownerSize)
+                    pOwner = LocalAlloc( LMEM_FIXED, ownerSize );
+                if (groupSize)
+                    pOwner = LocalAlloc( LMEM_FIXED, groupSize );
+
+                status = RtlSelfRelativeToAbsoluteSD( pOldSD, &desc, &descSize, pDacl, &daclSize, pSacl, &saclSize,
+                                                      pOwner, &ownerSize, pGroup, &groupSize );
+            }
+            if (status != STATUS_SUCCESS)
+            {
+                LocalFree( pDacl );
+                LocalFree( pSacl );
+                LocalFree( pOwner );
+                LocalFree( pGroup );
+                return set_ntstatus( status );
+            }
+        }
+        else
+        {
+            if ((status = RtlCopySecurityDescriptor( pOldSD, &desc )) != STATUS_SUCCESS)
+                return set_ntstatus( status );
+        }
+    }
+    else
+    {
+        if ((status = RtlCreateSecurityDescriptor( &desc, SECURITY_DESCRIPTOR_REVISION )) != STATUS_SUCCESS)
+            return set_ntstatus( status );
+    }
+
+    if (pOwner)
+    {
+        LocalFree( desc.Owner );
+        desc.Owner = LocalAlloc( LMEM_FIXED, sizeof(MAX_SID) );
+        if ((ret = trustee_to_sid( sizeof(MAX_SID), desc.Owner, pOwner )))
+            goto done;
+    }
+
+    if (pGroup)
+    {
+        LocalFree( desc.Group );
+        desc.Group = LocalAlloc( LMEM_FIXED, sizeof(MAX_SID) );
+        if ((ret = trustee_to_sid( sizeof(MAX_SID), desc.Group, pGroup )))
+            goto done;
+    }
+
+    if (pListOfAccessEntries)
+    {
+        PACL pNewDacl;
+
+        if ((ret = SetEntriesInAclW( cCountOfAccessEntries, pListOfAccessEntries, desc.Dacl, &pNewDacl )))
+            goto done;
+
+        LocalFree( desc.Dacl );
+        desc.Dacl = pNewDacl;
+        desc.Control |= SE_DACL_PRESENT;
+    }
+
+    if (pListOfAuditEntries)
+    {
+        PACL pNewSacl;
+
+        if ((ret = SetEntriesInAclW( cCountOfAuditEntries, pListOfAuditEntries, desc.Sacl, &pNewSacl )))
+            goto done;
+
+        LocalFree( desc.Sacl );
+        desc.Sacl = pNewSacl;
+        desc.Control |= SE_SACL_PRESENT;
+    }
+
+    *lpdwBufferLength = RtlLengthSecurityDescriptor( &desc );
+    *pNewSD = LocalAlloc( LMEM_FIXED, *lpdwBufferLength );
+
+    if ((status = MakeSelfRelativeSD( &desc, *pNewSD, lpdwBufferLength )) != STATUS_SUCCESS)
+    {
+        ret = set_ntstatus( status );
+        goto done;
+    }
+
+done:
+    /* free absolute descriptor */
+    LocalFree( desc.Owner );
+    LocalFree( desc.Group );
+    LocalFree( desc.Sacl );
+    LocalFree( desc.Dacl );
+
+    return ret;
 } 
 
 /******************************************************************************
@@ -3766,6 +3878,56 @@ static void free_trustee_name(TRUSTEE_FORM form, WCHAR *trustee_nameW)
     }
 }
 
+static DWORD trustee_to_sid( DWORD nDestinationSidLength, PSID pDestinationSid, PTRUSTEEW pTrustee )
+{
+    if (pTrustee->MultipleTrusteeOperation == TRUSTEE_IS_IMPERSONATE)
+    {
+        WARN("bad multiple trustee operation %d\n", pTrustee->MultipleTrusteeOperation);
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    switch (pTrustee->TrusteeForm)
+    {
+    case TRUSTEE_IS_SID:
+        if (!CopySid(nDestinationSidLength, pDestinationSid, pTrustee->ptstrName))
+        {
+            WARN("bad sid %p\n", pTrustee->ptstrName);
+            return ERROR_INVALID_PARAMETER;
+        }
+        break;
+    case TRUSTEE_IS_NAME:
+    {
+        DWORD sid_size = nDestinationSidLength;
+        DWORD domain_size = MAX_COMPUTERNAME_LENGTH + 1;
+        SID_NAME_USE use;
+        if (!strcmpW( pTrustee->ptstrName, CURRENT_USER ))
+        {
+            if (!lookup_user_account_name( pDestinationSid, &sid_size, NULL, &domain_size, &use ))
+            {
+                return GetLastError();
+            }
+        }
+        else if (!LookupAccountNameW(NULL, pTrustee->ptstrName, pDestinationSid, &sid_size, NULL, &domain_size, &use))
+        {
+            WARN("bad user name %s\n", debugstr_w(pTrustee->ptstrName));
+            return ERROR_INVALID_PARAMETER;
+        }
+        break;
+    }
+    case TRUSTEE_IS_OBJECTS_AND_SID:
+        FIXME("TRUSTEE_IS_OBJECTS_AND_SID unimplemented\n");
+        break;
+    case TRUSTEE_IS_OBJECTS_AND_NAME:
+        FIXME("TRUSTEE_IS_OBJECTS_AND_NAME unimplemented\n");
+        break;
+    default:
+        WARN("bad trustee form %d\n", pTrustee->TrusteeForm);
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    return ERROR_SUCCESS;
+}
+
 /******************************************************************************
  * SetEntriesInAclA [ADVAPI32.@]
  */
@@ -3861,56 +4023,9 @@ DWORD WINAPI SetEntriesInAclW( ULONG count, PEXPLICIT_ACCESSW pEntries,
               pEntries[i].Trustee.TrusteeForm, pEntries[i].Trustee.TrusteeType,
               pEntries[i].Trustee.ptstrName);
 
-        if (pEntries[i].Trustee.MultipleTrusteeOperation == TRUSTEE_IS_IMPERSONATE)
-        {
-            WARN("bad multiple trustee operation %d for trustee %d\n", pEntries[i].Trustee.MultipleTrusteeOperation, i);
-            ret = ERROR_INVALID_PARAMETER;
+        ret = trustee_to_sid( FIELD_OFFSET(SID, SubAuthority[SID_MAX_SUB_AUTHORITIES]), ppsid[i], &pEntries[i].Trustee);
+        if (ret)
             goto exit;
-        }
-
-        switch (pEntries[i].Trustee.TrusteeForm)
-        {
-        case TRUSTEE_IS_SID:
-            if (!CopySid(FIELD_OFFSET(SID, SubAuthority[SID_MAX_SUB_AUTHORITIES]),
-                         ppsid[i], pEntries[i].Trustee.ptstrName))
-            {
-                WARN("bad sid %p for trustee %d\n", pEntries[i].Trustee.ptstrName, i);
-                ret = ERROR_INVALID_PARAMETER;
-                goto exit;
-            }
-            break;
-        case TRUSTEE_IS_NAME:
-        {
-            DWORD sid_size = FIELD_OFFSET(SID, SubAuthority[SID_MAX_SUB_AUTHORITIES]);
-            DWORD domain_size = MAX_COMPUTERNAME_LENGTH + 1;
-            SID_NAME_USE use;
-            if (!strcmpW( pEntries[i].Trustee.ptstrName, CURRENT_USER ))
-            {
-                if (!lookup_user_account_name( ppsid[i], &sid_size, NULL, &domain_size, &use ))
-                {
-                    ret = GetLastError();
-                    goto exit;
-                }
-            }
-            else if (!LookupAccountNameW(NULL, pEntries[i].Trustee.ptstrName, ppsid[i], &sid_size, NULL, &domain_size, &use))
-            {
-                WARN("bad user name %s for trustee %d\n", debugstr_w(pEntries[i].Trustee.ptstrName), i);
-                ret = ERROR_INVALID_PARAMETER;
-                goto exit;
-            }
-            break;
-        }
-        case TRUSTEE_IS_OBJECTS_AND_SID:
-            FIXME("TRUSTEE_IS_OBJECTS_AND_SID unimplemented\n");
-            break;
-        case TRUSTEE_IS_OBJECTS_AND_NAME:
-            FIXME("TRUSTEE_IS_OBJECTS_AND_NAME unimplemented\n");
-            break;
-        default:
-            WARN("bad trustee form %d for trustee %d\n", pEntries[i].Trustee.TrusteeForm, i);
-            ret = ERROR_INVALID_PARAMETER;
-            goto exit;
-        }
 
         /* Note: we overestimate the ACL size here as a tradeoff between
          * instructions (simplicity) and memory */
