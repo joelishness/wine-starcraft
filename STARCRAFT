@@ -1,0 +1,17 @@
+
+
+0. Quick Start
+
+Compile 32-bit wine as normal (https://wiki.winehq.org/Building_Wine).
+
+Install wine as normal. Install StarCraft using the installer from Blizzard.
+
+StarCraft requires the Arial font. You should use winetricks corefonts to install it.
+
+Also, using winecfg, you should set StarCraft.exe (or the default) to Windows XP. If you don't,
+then you will get crash messages and Battle.net will fail to load.
+
+Lastly, using winecfg, enable "Hide Wine version from applications". With the latest patch, this
+option will also disable exports for some APIs that are too new for Windows XP. If you don't, then
+under Windows XP mode StarCraft will crash after a couple minutes.
+
