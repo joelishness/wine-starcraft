@@ -1848,6 +1848,117 @@ static WCHAR *get_builtin_fullname( const WCHAR *path, const char *filename )
     return fullname;
 }
 
+/* sorted lists (by name) */
+static const char *hidden_dlls_version[] = {
+    "kernel32.dll",
+    "ntdll.dll",
+    NULL
+};
+static struct
+{
+    const char *name;
+    /* version that introduced export */
+    WORD version;
+} hidden_exports_version[] = {
+    { "GetTickCount64", MAKEWORD(0, 6) },
+    { "NtGetTickCount", MAKEWORD(0, 6) },
+    { NULL, 0 },
+};
+
+static void hide_exports_version( HMODULE module, const char *filename )
+{
+    WORD *ordinals;
+    DWORD *names;
+    IMAGE_EXPORT_DIRECTORY *exports;
+    WORD version = MAKEWORD(NtCurrentTeb()->Peb->OSMinorVersion,
+                            NtCurrentTeb()->Peb->OSMajorVersion);
+    PVOID protect_base;
+    SIZE_T protect_size = 0;
+    DWORD protect_old;
+    DWORD exp_size;
+    int pos, i;
+
+    if (!version)
+    {
+        ERR( "version is 0, called before version_init?\n" );
+        return;
+    }
+
+    /* check if we care about this dll */
+    for (i = 0; hidden_dlls_version[i]; ++i)
+    {
+        int result = strcasecmp( filename, hidden_dlls_version[i] );
+        if (result < 0)
+            /* not found */
+            return;
+        if (result == 0)
+            break;
+    }
+    if (!hidden_dlls_version[i])
+        /* not found */
+        return;
+
+    if (!(exports = RtlImageDirectoryEntryToData( module, TRUE,
+                                                  IMAGE_DIRECTORY_ENTRY_EXPORT, &exp_size )))
+        return;
+
+    TRACE( "looking for exports in %s\n", filename );
+
+    ordinals = get_rva( module, exports->AddressOfNameOrdinals );
+    names = get_rva( module, exports->AddressOfNames );
+
+    /* assumes that exports are sorted */
+    for (pos = 0, i = 0; pos < exports->NumberOfNames && hidden_exports_version[i].name; )
+    {
+        int result;
+        char *ename = get_rva( module, names[pos] );
+        result = strcmp( ename, hidden_exports_version[i].name );
+        if (result < 0)
+        {
+            pos++;
+        }
+        else if (result > 0)
+        {
+            i++;
+        }
+        else if (version >= hidden_exports_version[i].version)
+        {
+            pos++;
+            i++;
+        }
+        else
+        {
+            int j;
+
+            TRACE( "hiding export for %s (%d)\n", ename, pos );
+
+            if (protect_size == 0)
+            {
+                protect_base = (PVOID)((INT_PTR)exports & ~0xfff);
+                if ((INT_PTR)ordinals < (INT_PTR)names)
+                    protect_size = (INT_PTR)(names + exports->NumberOfNames) - (INT_PTR)protect_base;
+                else
+                    protect_size = (INT_PTR)(ordinals + exports->NumberOfNames) - (INT_PTR)protect_base;
+                protect_size = (protect_size + 0xfff) & ~0xfff;
+                NtProtectVirtualMemory( NtCurrentProcess(), &protect_base,
+                                        &protect_size, PAGE_READWRITE, &protect_old );
+            }
+
+            ++i;
+            --exports->NumberOfNames;
+
+            for (j = pos; j < exports->NumberOfNames; ++j)
+            {
+                names[j] = names[j+1];
+                ordinals[j] = ordinals[j+1];
+            }
+        }
+    }
+
+    if (protect_size)
+        NtProtectVirtualMemory( NtCurrentProcess(), &protect_base, &protect_size, protect_old, &protect_old );
+}
+
 
 /*************************************************************************
  *		is_16bit_builtin
@@ -1931,6 +2042,9 @@ static void load_builtin_callback( void *module, const char *filename )
             return;
         }
     }
+
+    if (hide_wine_exports)
+        hide_exports_version( module, filename );
 
     builtin_load_info->wm = wm;
     TRACE( "loaded %s %p %p\n", filename, wm, module );
@@ -3560,6 +3674,13 @@ void WINAPI LdrInitializeThunk( void *kernel_start, ULONG_PTR unknown2,
 
     /* the windows version was not set yet when ntdll and kernel32 were loaded */
     recompute_hash_map();
+    if (hide_wine_exports)
+    {
+        static const WCHAR ntdllW[] = {'n','t','d','l','l','.','d','l','l',0};
+        static const WCHAR kernel32W[] = {'k','e','r','n','e','l','3','2','.','d','l','l',0};
+        hide_exports_version( find_basename_module(ntdllW)->ldr.BaseAddress, "ntdll.dll" );
+        hide_exports_version( find_basename_module(kernel32W)->ldr.BaseAddress, "kernel32.dll" );
+    }
 
     if ((status = virtual_alloc_thread_stack( NtCurrentTeb(), 0, 0 )) != STATUS_SUCCESS) goto error;
     if ((status = server_init_process_done()) != STATUS_SUCCESS) goto error;
