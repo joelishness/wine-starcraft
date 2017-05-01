@@ -1970,7 +1970,7 @@ void WINAPI KeQuerySystemTime( LARGE_INTEGER *time )
  */
 void WINAPI KeQueryTickCount( LARGE_INTEGER *count )
 {
-    count->QuadPart = __wine_NtGetTickCount();
+    count->QuadPart = NtGetTickCount();
     /* update the global variable too */
     KeTickCount.LowPart   = count->u.LowPart;
     KeTickCount.High1Time = count->u.HighPart;

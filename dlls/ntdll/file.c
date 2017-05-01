@@ -814,7 +814,7 @@ static NTSTATUS get_io_timeouts( HANDLE handle, enum server_fd_type type, ULONG 
     default:
         break;
     }
-    if (timeouts->total != -1) timeouts->end_time = __wine_NtGetTickCount() + timeouts->total;
+    if (timeouts->total != -1) timeouts->end_time = NtGetTickCount() + timeouts->total;
     return STATUS_SUCCESS;
 }
 
@@ -826,7 +826,7 @@ static inline int get_next_io_timeout( const struct io_timeouts *timeouts, ULONG
 
     if (timeouts->total != -1)
     {
-        ret = timeouts->end_time - __wine_NtGetTickCount();
+        ret = timeouts->end_time - NtGetTickCount();
         if (ret < 0) ret = 0;
     }
     if (already && timeouts->interval != -1)
