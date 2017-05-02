@@ -1057,6 +1057,10 @@ static void testDeviceRegistryPropertyA(void)
     todo_wine
     ok(!ret && GetLastError() == ERROR_INVALID_DATA,
      "Expected ERROR_INVALID_DATA, got %08x\n", GetLastError());
+    ret = pSetupDiGetDeviceRegistryPropertyA(set, &devInfo, SPDRP_HARDWAREID,
+     NULL, NULL, 0, &size);
+    ok(!ret && GetLastError() == ERROR_INVALID_DATA,
+     "Expected ERROR_INVALID_DATA, got %08x\n", GetLastError());
     pSetupDiDestroyDeviceInfoList(set);
 
     res = RegOpenKeyA(HKEY_LOCAL_MACHINE, bogus, &key);
@@ -1160,6 +1164,10 @@ static void testDeviceRegistryPropertyW(void)
     ret = pSetupDiGetDeviceRegistryPropertyW(set, &devInfo, SPDRP_FRIENDLYNAME,
      NULL, (PBYTE)buf, buflen, &size);
     todo_wine
+    ok(!ret && GetLastError() == ERROR_INVALID_DATA,
+     "Expected ERROR_INVALID_DATA, got %08x\n", GetLastError());
+    ret = pSetupDiGetDeviceRegistryPropertyW(set, &devInfo, SPDRP_HARDWAREID,
+     NULL, NULL, 0, &size);
     ok(!ret && GetLastError() == ERROR_INVALID_DATA,
      "Expected ERROR_INVALID_DATA, got %08x\n", GetLastError());
     pSetupDiDestroyDeviceInfoList(set);
